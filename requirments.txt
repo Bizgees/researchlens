@@ -4,6 +4,7 @@ crewai-tools==0.1.6
 langchain-google-genai
 google-generativeai
 langchain-community
+docx
 python-docx
 plotly
 tiktoken==0.7.0
