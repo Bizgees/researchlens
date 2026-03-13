@@ -159,7 +159,7 @@ def build_llm(gemini_key: str, serper_key: str):
     os.environ["SERPER_API_KEY"] = serper_key
     genai.configure(api_key=gemini_key)
     return genai.GenerativeModel(
-        model_name="gemini-2.5-flash-preview-04-17",
+        model_name="gemini-1.5-flash",
         generation_config=genai.GenerationConfig(temperature=0.2),
     )
 
