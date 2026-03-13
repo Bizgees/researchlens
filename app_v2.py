@@ -2,11 +2,10 @@ import os
 import io
 import json
 import zipfile
+import requests
 import streamlit as st
 from docx import Document
-from crewai import Agent, Task, Crew
-from langchain_google_genai import ChatGoogleGenerativeAI
-from crewai_tools import SerperDevTool
+import google.generativeai as genai
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────
@@ -154,26 +153,24 @@ MAX_CHARS = 3000
 # ─────────────────────────────────────────────
 # AI HELPERS
 # ─────────────────────────────────────────────
-def make_agent(llm):
-    return Agent(
-        role="Research Assistant",
-        goal="Help users understand research articles clearly and accurately",
-        backstory="You are an expert at reading, summarizing, and explaining research papers.",
-        tools=[],
-        llm=llm,
-        verbose=False,
-    )
-
 def build_llm(gemini_key: str, serper_key: str):
+    """Configure Gemini and return a callable model."""
     os.environ["GOOGLE_API_KEY"] = gemini_key
     os.environ["SERPER_API_KEY"] = serper_key
-    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, google_api_key=gemini_key)
+    genai.configure(api_key=gemini_key)
+    return genai.GenerativeModel(
+        model_name="gemini-2.5-flash-preview-04-17",
+        generation_config=genai.GenerationConfig(temperature=0.2),
+    )
+
+def _ask(llm, prompt: str) -> str:
+    """Send a prompt to Gemini and return the text response."""
+    response = llm.generate_content(prompt)
+    return response.text.strip()
 
 def extract_country(llm, article_text: str, file_name: str) -> str:
     """Use AI to extract the primary country an article is about."""
-    agent = make_agent(llm)
-    task = Task(
-        description=f"""Read the following article excerpt and identify the PRIMARY country it is about.
+    prompt = f"""Read the following article excerpt and identify the PRIMARY country it is about.
 
 Rules:
 - Return ONLY the country name as it appears in standard ISO naming (e.g. "United States", "United Kingdom", "South Africa").
@@ -184,37 +181,24 @@ Rules:
 File name hint: {file_name}
 
 Article excerpt:
-{article_text[:1500]}""",
-        expected_output="A single country name only, e.g. 'Kenya' or 'United States'.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    result = str(crew.kickoff()).strip()
-    # Clean up common LLM verbosity
+{article_text[:1500]}"""
+    result = _ask(llm, prompt)
     for prefix in ["The country is", "Country:", "Answer:", "Primary country:"]:
         if result.lower().startswith(prefix.lower()):
             result = result[len(prefix):].strip()
     return result.strip(".,\n\"' ")
 
 def run_summary(llm, article_text: str) -> str:
-    agent = make_agent(llm)
-    task = Task(
-        description=f"""Summarize the following research article in 5-6 clear sentences.
+    prompt = f"""Summarize the following research article in 5-6 clear sentences.
 Focus only on the main idea and key findings from the article text.
 Do NOT add outside information.
 
 Article:
-{article_text}""",
-        expected_output="A concise 5-6 sentence summary of the article.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+{article_text}"""
+    return _ask(llm, prompt)
 
 def run_enhanced_summary(llm, article_text: str, web_results: str, topic: str) -> str:
-    agent = make_agent(llm)
-    task = Task(
-        description=f"""You have two sources about "{topic}":
+    prompt = f"""You have two sources about "{topic}":
 
 1. LOCAL ARTICLE:
 {article_text}
@@ -226,32 +210,22 @@ Write an enhanced summary (6-8 sentences) that:
 - Starts with the local article's main findings
 - Then adds NEW context and insights from the web results
 - Clearly distinguishes between what the article says vs what the web adds
-- Does NOT simply repeat the local summary""",
-        expected_output="An enhanced 6-8 sentence summary combining local and web findings.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+- Does NOT simply repeat the local summary"""
+    return _ask(llm, prompt)
 
 def run_qa(llm, article_text: str, question: str, web_results: str = "") -> str:
-    agent = make_agent(llm)
     context = f"LOCAL ARTICLE:\n{article_text}"
     if web_results:
         context += f"\n\nWEB SEARCH CONTEXT:\n{web_results}"
-    task = Task(
-        description=f"""Answer the user's question using the context below.
+    prompt = f"""Answer the user's question using the context below.
 Be specific and direct. If the answer is not in the context, say so clearly.
 
 CONTEXT:
 {context}
 
 USER QUESTION:
-{question}""",
-        expected_output="A clear, direct answer to the user's question.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+{question}"""
+    return _ask(llm, prompt)
 
 
 # ─────────────────────────────────────────────
@@ -710,10 +684,23 @@ if st.session_state.summary:
             search_term = art["file_name"].rsplit(".", 1)[0]
             with st.spinner("Searching the web…"):
                 try:
-                    import os
-                    search_tool = SerperDevTool()
-                    web_result = search_tool._run(search_query=search_term)
-                    web_results = web_result if isinstance(web_result, str) else str(web_result)
+                    serper_api_key = os.environ.get("SERPER_API_KEY", "")
+                    resp = requests.post(
+                        "https://google.serper.dev/search",
+                        headers={"X-API-KEY": serper_api_key, "Content-Type": "application/json"},
+                        json={"q": search_term, "num": 5},
+                        timeout=10,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    snippets = []
+                    for item in data.get("organic", []):
+                        title   = item.get("title", "")
+                        snippet = item.get("snippet", "")
+                        link    = item.get("link", "")
+                        if snippet:
+                            snippets.append(f"- {title}: {snippet} ({link})")
+                    web_results = "\n".join(snippets) if snippets else ""
                     st.session_state.web_results = web_results
                 except Exception as e:
                     st.error(f"Web search failed: {e}")
