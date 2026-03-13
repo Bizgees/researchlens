@@ -163,7 +163,7 @@ def build_llm(gemini_key: str, serper_key: str):
 def _ask(llm, prompt: str) -> str:
     """Send a prompt to Gemini and return the text response."""
     response = llm.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.0-flash-lite",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.2),
     )
