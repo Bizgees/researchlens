@@ -2,11 +2,10 @@ import os
 import io
 import json
 import zipfile
+import requests
 import streamlit as st
 from docx import Document
-from crewai import Agent, Task, Crew
-from langchain_google_genai import ChatGoogleGenerativeAI
-from crewai_tools import SerperDevTool
+from groq import Groq
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────
@@ -154,26 +153,23 @@ MAX_CHARS = 3000
 # ─────────────────────────────────────────────
 # AI HELPERS
 # ─────────────────────────────────────────────
-def make_agent(llm):
-    return Agent(
-        role="Research Assistant",
-        goal="Help users understand research articles clearly and accurately",
-        backstory="You are an expert at reading, summarizing, and explaining research papers.",
-        tools=[],
-        llm=llm,
-        verbose=False,
-    )
-
-def build_llm(gemini_key: str, serper_key: str):
-    os.environ["GOOGLE_API_KEY"] = gemini_key
+def build_llm(groq_key: str, serper_key: str):
+    """Configure Groq and return a client."""
     os.environ["SERPER_API_KEY"] = serper_key
-    return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, google_api_key=gemini_key)
+    return Groq(api_key=groq_key)
+
+def _ask(llm, prompt: str) -> str:
+    """Send a prompt to Groq and return the text response."""
+    response = llm.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    return response.choices[0].message.content.strip()
 
 def extract_country(llm, article_text: str, file_name: str) -> str:
     """Use AI to extract the primary country an article is about."""
-    agent = make_agent(llm)
-    task = Task(
-        description=f"""Read the following article excerpt and identify the PRIMARY country it is about.
+    prompt = f"""Read the following article excerpt and identify the PRIMARY country it is about.
 
 Rules:
 - Return ONLY the country name as it appears in standard ISO naming (e.g. "United States", "United Kingdom", "South Africa").
@@ -184,37 +180,24 @@ Rules:
 File name hint: {file_name}
 
 Article excerpt:
-{article_text[:1500]}""",
-        expected_output="A single country name only, e.g. 'Kenya' or 'United States'.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    result = str(crew.kickoff()).strip()
-    # Clean up common LLM verbosity
+{article_text[:1500]}"""
+    result = _ask(llm, prompt)
     for prefix in ["The country is", "Country:", "Answer:", "Primary country:"]:
         if result.lower().startswith(prefix.lower()):
             result = result[len(prefix):].strip()
     return result.strip(".,\n\"' ")
 
 def run_summary(llm, article_text: str) -> str:
-    agent = make_agent(llm)
-    task = Task(
-        description=f"""Summarize the following research article in 5-6 clear sentences.
+    prompt = f"""Summarize the following research article in 5-6 clear sentences.
 Focus only on the main idea and key findings from the article text.
 Do NOT add outside information.
 
 Article:
-{article_text}""",
-        expected_output="A concise 5-6 sentence summary of the article.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+{article_text}"""
+    return _ask(llm, prompt)
 
 def run_enhanced_summary(llm, article_text: str, web_results: str, topic: str) -> str:
-    agent = make_agent(llm)
-    task = Task(
-        description=f"""You have two sources about "{topic}":
+    prompt = f"""You have two sources about "{topic}":
 
 1. LOCAL ARTICLE:
 {article_text}
@@ -226,42 +209,31 @@ Write an enhanced summary (6-8 sentences) that:
 - Starts with the local article's main findings
 - Then adds NEW context and insights from the web results
 - Clearly distinguishes between what the article says vs what the web adds
-- Does NOT simply repeat the local summary""",
-        expected_output="An enhanced 6-8 sentence summary combining local and web findings.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+- Does NOT simply repeat the local summary"""
+    return _ask(llm, prompt)
 
 def run_qa(llm, article_text: str, question: str, web_results: str = "") -> str:
-    agent = make_agent(llm)
     context = f"LOCAL ARTICLE:\n{article_text}"
     if web_results:
         context += f"\n\nWEB SEARCH CONTEXT:\n{web_results}"
-    task = Task(
-        description=f"""Answer the user's question using the context below.
+    prompt = f"""Answer the user's question using the context below.
 Be specific and direct. If the answer is not in the context, say so clearly.
 
 CONTEXT:
 {context}
 
 USER QUESTION:
-{question}""",
-        expected_output="A clear, direct answer to the user's question.",
-        agent=agent,
-    )
-    crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+{question}"""
+    return _ask(llm, prompt)
 
 
 # ─────────────────────────────────────────────
 # ARTICLE LOADING & CACHE
 # ─────────────────────────────────────────────
-BUNDLED_FOLDER = "articles"        # folder in GitHub repo alongside app file
-CACHE_FILE     = "article_cache.json"  # persists country detection results
+BUNDLED_FOLDER = "articles"
+CACHE_FILE     = "article_cache.json"
 
 def load_cache() -> dict:
-    """Load the article cache (file_name -> country) from disk."""
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r") as f:
@@ -271,7 +243,6 @@ def load_cache() -> dict:
     return {}
 
 def save_cache(cache: dict):
-    """Save the article cache to disk."""
     try:
         with open(CACHE_FILE, "w") as f:
             json.dump(cache, f, indent=2)
@@ -279,7 +250,6 @@ def save_cache(cache: dict):
         pass
 
 def parse_docx_bytes(file_bytes: bytes, file_name: str) -> dict | None:
-    """Parse a .docx file from bytes into an article dict."""
     try:
         doc = Document(io.BytesIO(file_bytes))
         text = " ".join(p.text for p in doc.paragraphs)
@@ -291,7 +261,6 @@ def parse_docx_bytes(file_bytes: bytes, file_name: str) -> dict | None:
     return None
 
 def load_from_folder(folder_path: str) -> list:
-    """Load .docx files from a local folder path."""
     articles = []
     for root, _, files in os.walk(folder_path):
         for file in files:
@@ -308,7 +277,6 @@ def load_from_folder(folder_path: str) -> list:
     return articles
 
 def load_from_zip(zip_file) -> list:
-    """Extract and load .docx files from an uploaded ZIP."""
     articles = []
     try:
         with zipfile.ZipFile(io.BytesIO(zip_file.read())) as zf:
@@ -329,7 +297,6 @@ def load_from_zip(zip_file) -> list:
 # MAP BUILDER
 # ─────────────────────────────────────────────
 def build_world_map(articles_with_countries: list):
-    """Build a Plotly choropleth world map highlighting countries in the articles."""
     country_counts = {}
     country_articles = {}
     for art in articles_with_countries:
@@ -392,8 +359,8 @@ def build_world_map(articles_with_countries: list):
 # ─────────────────────────────────────────────
 defaults = {
     "llm": None,
-    "articles": [],           # list of dicts with country assigned
-    "country_articles": {},   # {country: [file_names]}
+    "articles": [],
+    "country_articles": {},
     "selected_country": None,
     "selected_article": None,
     "summary": None,
@@ -409,26 +376,18 @@ for k, v in defaults.items():
 
 
 # ─────────────────────────────────────────────
-# HELPERS — process articles with AI country detection + caching
+# HELPERS
 # ─────────────────────────────────────────────
 def process_articles(raw_articles: list, llm, progress_widget=None) -> tuple:
-    """
-    Run AI country extraction only for articles not already in cache.
-    Saves results back to cache so they are never re-processed.
-    Returns (articles, country_articles).
-    """
     cache = load_cache()
     new_extractions = 0
 
-    # Separate articles needing AI vs already cached
     need_ai = [a for a in raw_articles if a["file_name"] not in cache]
     cached  = [a for a in raw_articles if a["file_name"] in cache]
 
-    # Apply cached countries immediately
     for art in cached:
         art["country"] = cache[art["file_name"]]
 
-    # Run AI only on uncached articles
     total = len(need_ai)
     for i, art in enumerate(need_ai):
         if progress_widget and total > 0:
@@ -438,7 +397,6 @@ def process_articles(raw_articles: list, llm, progress_widget=None) -> tuple:
         cache[art["file_name"]] = country
         new_extractions += 1
 
-    # Save updated cache
     if new_extractions > 0:
         save_cache(cache)
 
@@ -454,7 +412,6 @@ def process_articles(raw_articles: list, llm, progress_widget=None) -> tuple:
 
 
 def rebuild_country_index(articles: list) -> dict:
-    """Rebuild the country → articles index from a list of articles."""
     ca = {}
     for art in articles:
         c = art.get("country", "Unknown")
@@ -463,7 +420,6 @@ def rebuild_country_index(articles: list) -> dict:
 
 
 def auto_load_bundled(llm) -> tuple:
-    """Load bundled articles from the articles/ folder, using cache for country detection."""
     raw = load_from_folder(BUNDLED_FOLDER)
     if not raw:
         return [], {}
@@ -479,24 +435,28 @@ with st.sidebar:
     st.markdown("<p style='color:#7a8099;font-size:0.85rem;margin-top:-0.5rem'>World Article Explorer</p>", unsafe_allow_html=True)
     st.markdown("---")
 
-    # ── API Keys ──
     st.markdown("### ⚙️ API Keys")
     try:
-        default_gemini = st.secrets.get("GOOGLE_API_KEY", "")
+        default_groq   = st.secrets.get("GROQ_API_KEY", "")
         default_serper = st.secrets.get("SERPER_API_KEY", "")
     except Exception:
-        default_gemini = ""
+        default_groq   = ""
         default_serper = ""
-    gemini_key = st.text_input("Google Gemini API Key", value=default_gemini, type="password", placeholder="AIza...")
-    serper_key  = st.text_input("Serper API Key", value=default_serper, type="password", placeholder="Your Serper key")
-    st.markdown("<p style='color:#7a8099;font-size:0.75rem'>Get a free Gemini key at <a href='https://aistudio.google.com' target='_blank' style='color:#e8b86d'>aistudio.google.com</a></p>", unsafe_allow_html=True)
 
-    # ── Auto-load bundled articles on startup ──
-    keys_ready = bool(gemini_key and serper_key)
+    groq_key   = st.text_input("Groq API Key", value=default_groq, type="password", placeholder="gsk_...")
+    serper_key = st.text_input("Serper API Key", value=default_serper, type="password", placeholder="Your Serper key")
+    st.markdown(
+        "<p style='color:#7a8099;font-size:0.75rem'>"
+        "Get a free Groq key at <a href='https://console.groq.com' target='_blank' style='color:#e8b86d'>console.groq.com</a>"
+        "</p>",
+        unsafe_allow_html=True
+    )
+
+    keys_ready     = bool(groq_key and serper_key)
     bundled_exists = os.path.exists(BUNDLED_FOLDER)
 
     if keys_ready and bundled_exists and not st.session_state.articles:
-        st.session_state.llm = build_llm(gemini_key, serper_key)
+        st.session_state.llm = build_llm(groq_key, serper_key)
         with st.spinner("Loading articles…"):
             prog = st.progress(0, text="Checking article cache…")
             arts, ca = auto_load_bundled(st.session_state.llm)
@@ -506,7 +466,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── Bundled articles status ──
     st.markdown("### 📚 Bundled Articles")
     if bundled_exists:
         bundled_count = sum(1 for _, _, fs in os.walk(BUNDLED_FOLDER) for f in fs if f.lower().endswith(".docx"))
@@ -524,7 +483,7 @@ with st.sidebar:
         if not keys_ready:
             st.error("Enter both API keys first.")
         else:
-            st.session_state.llm = build_llm(gemini_key, serper_key)
+            st.session_state.llm = build_llm(groq_key, serper_key)
             for k in ["articles","country_articles","selected_country",
                       "selected_article","summary","enhanced_summary",
                       "web_results","web_search_done","chat_history"]:
@@ -538,7 +497,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── ZIP upload for new articles ──
     st.markdown("### ➕ Add New Articles")
     st.markdown(
         "<p style='color:#7a8099;font-size:0.82rem'>"
@@ -546,7 +504,7 @@ with st.sidebar:
         "Only NEW articles (not already in the library) will be processed.</p>",
         unsafe_allow_html=True
     )
-    zip_file = st.file_uploader("Upload ZIP", type=["zip"], label_visibility="collapsed")
+    zip_file   = st.file_uploader("Upload ZIP", type=["zip"], label_visibility="collapsed")
     upload_btn = st.button("➕ Add Articles from ZIP", use_container_width=True, disabled=not zip_file)
 
     if upload_btn and zip_file:
@@ -554,7 +512,7 @@ with st.sidebar:
             st.error("Enter both API keys first.")
         else:
             if not st.session_state.llm:
-                st.session_state.llm = build_llm(gemini_key, serper_key)
+                st.session_state.llm = build_llm(groq_key, serper_key)
             with st.spinner("Extracting ZIP…"):
                 new_arts = load_from_zip(zip_file)
 
@@ -573,7 +531,6 @@ with st.sidebar:
                     st.success(f"✅ {len(truly_new)} new article(s) added!")
                     st.info("💡 To make these permanent, add the .docx files to your articles/ folder on GitHub.")
 
-    # ── Country index ──
     if st.session_state.country_articles:
         st.markdown("---")
         st.markdown("### 🗺 Countries Found")
@@ -606,8 +563,7 @@ st.markdown("<p style='color:#7a8099;font-size:0.88rem;margin-top:-0.5rem'>Hover
 fig, country_articles_map = build_world_map(st.session_state.articles)
 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-# ── Country selector below map ──
-known_countries = sorted([c for c in st.session_state.country_articles.keys() if c != "Unknown"])
+known_countries  = sorted([c for c in st.session_state.country_articles.keys() if c != "Unknown"])
 unknown_articles = st.session_state.country_articles.get("Unknown", [])
 
 if known_countries:
@@ -635,11 +591,11 @@ if unknown_articles:
 
 
 # ─────────────────────────────────────────────
-# ARTICLE LIST FOR SELECTED COUNTRY
+# ARTICLE LIST
 # ─────────────────────────────────────────────
 if st.session_state.selected_country:
     country = st.session_state.selected_country
-    arts = st.session_state.country_articles.get(country, [])
+    arts    = st.session_state.country_articles.get(country, [])
 
     st.markdown("---")
     st.markdown(f"### 📄 Articles · {country}")
@@ -672,7 +628,7 @@ if st.session_state.selected_country:
 # SUMMARY
 # ─────────────────────────────────────────────
 if st.session_state.selected_article:
-    art = st.session_state.selected_article
+    art          = st.session_state.selected_article
     article_text = art["text"][:MAX_CHARS]
 
     st.markdown("---")
@@ -698,7 +654,7 @@ if st.session_state.selected_article:
 # WEB ENRICHMENT
 # ─────────────────────────────────────────────
 if st.session_state.summary:
-    art = st.session_state.selected_article
+    art          = st.session_state.selected_article
     article_text = art["text"][:MAX_CHARS]
 
     st.markdown("---")
@@ -710,10 +666,23 @@ if st.session_state.summary:
             search_term = art["file_name"].rsplit(".", 1)[0]
             with st.spinner("Searching the web…"):
                 try:
-                    import os
-                    search_tool = SerperDevTool()
-                    web_result = search_tool._run(search_query=search_term)
-                    web_results = web_result if isinstance(web_result, str) else str(web_result)
+                    serper_api_key = os.environ.get("SERPER_API_KEY", "")
+                    resp = requests.post(
+                        "https://google.serper.dev/search",
+                        headers={"X-API-KEY": serper_api_key, "Content-Type": "application/json"},
+                        json={"q": search_term, "num": 5},
+                        timeout=10,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    snippets = []
+                    for item in data.get("organic", []):
+                        title   = item.get("title", "")
+                        snippet = item.get("snippet", "")
+                        link    = item.get("link", "")
+                        if snippet:
+                            snippets.append(f"- {title}: {snippet} ({link})")
+                    web_results = "\n".join(snippets) if snippets else ""
                     st.session_state.web_results = web_results
                 except Exception as e:
                     st.error(f"Web search failed: {e}")
@@ -741,14 +710,13 @@ if st.session_state.summary:
 # Q&A
 # ─────────────────────────────────────────────
 if st.session_state.summary:
-    art = st.session_state.selected_article
+    art          = st.session_state.selected_article
     article_text = art["text"][:MAX_CHARS]
 
     st.markdown("---")
     st.markdown("### 💬 Ask Follow-up Questions")
     st.markdown("<p style='color:#7a8099;font-size:0.88rem;margin-top:-0.4rem'>Ask anything about this article. Web context is included if you ran the web search.</p>", unsafe_allow_html=True)
 
-    # Chat history
     for turn in st.session_state.chat_history:
         st.markdown(f"<div class='chat-bubble user'><div class='chat-label'>You</div>{turn['q']}</div>", unsafe_allow_html=True)
         st.markdown(f"<div class='chat-bubble ai'><div class='chat-label'>A4G-ResearchLens</div>{turn['a']}</div>", unsafe_allow_html=True)
