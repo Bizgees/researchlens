@@ -1,0 +1,9 @@
+streamlit
+crewai==1.1.0
+crewai-tools==0.1.6
+langchain-google-genai
+google-generativeai
+langchain-community
+python-docx
+plotly
+tiktoken==0.7.0
