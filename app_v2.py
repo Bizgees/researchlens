@@ -5,7 +5,8 @@ import zipfile
 import requests
 import streamlit as st
 from docx import Document
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────
@@ -154,18 +155,18 @@ MAX_CHARS = 3000
 # AI HELPERS
 # ─────────────────────────────────────────────
 def build_llm(gemini_key: str, serper_key: str):
-    """Configure Gemini and return a callable model."""
+    """Configure Gemini and return a client."""
     os.environ["GOOGLE_API_KEY"] = gemini_key
     os.environ["SERPER_API_KEY"] = serper_key
-    genai.configure(api_key=gemini_key)
-    return genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        generation_config=genai.GenerationConfig(temperature=0.2),
-    )
+    return genai.Client(api_key=gemini_key)
 
 def _ask(llm, prompt: str) -> str:
     """Send a prompt to Gemini and return the text response."""
-    response = llm.generate_content(prompt)
+    response = llm.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.2),
+    )
     return response.text.strip()
 
 def extract_country(llm, article_text: str, file_name: str) -> str:
