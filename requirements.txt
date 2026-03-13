@@ -1,8 +1,0 @@
-streamlit
-crewai
-crewai_tools
-langchain-google-genai
-google-generativeai
-langchain_community
-python-docx
-plotly
