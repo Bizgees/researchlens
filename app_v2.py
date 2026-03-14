@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import time
 import zipfile
 import requests
 import streamlit as st
@@ -161,13 +162,22 @@ def build_llm(gemini_key: str, serper_key: str):
     return genai.Client(api_key=gemini_key)
 
 def _ask(llm, prompt: str) -> str:
-    """Send a prompt to Gemini and return the text response."""
-    response = llm.models.generate_content(
-        model="gemini-2.0-flash-lite",
-        contents=prompt,
-        config=types.GenerateContentConfig(temperature=0.2),
-    )
-    return response.text.strip()
+    """Send a prompt to Gemini with automatic retry on rate limit."""
+    for attempt in range(5):
+        try:
+            response = llm.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.2),
+            )
+            return response.text.strip()
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                wait = 15 * (attempt + 1)
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("Rate limit: too many retries. Please wait a few minutes.")
 
 def extract_country(llm, article_text: str, file_name: str) -> str:
     prompt = f"""Read the following article excerpt and identify the PRIMARY country it is about.
@@ -397,6 +407,7 @@ def process_articles(raw_articles: list, llm, progress_widget=None) -> tuple:
         art["country"] = country
         cache[art["file_name"]] = country
         new_extractions += 1
+        time.sleep(3)  # 3s delay between articles to avoid rate limits
 
     if new_extractions > 0:
         save_cache(cache)
