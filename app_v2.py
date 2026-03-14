@@ -5,7 +5,8 @@ import zipfile
 import requests
 import streamlit as st
 from docx import Document
-from groq import Groq
+from google import genai
+from google.genai import types
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────
@@ -153,22 +154,22 @@ MAX_CHARS = 3000
 # ─────────────────────────────────────────────
 # AI HELPERS
 # ─────────────────────────────────────────────
-def build_llm(groq_key: str, serper_key: str):
-    """Configure Groq and return a client."""
+def build_llm(gemini_key: str, serper_key: str):
+    """Configure Gemini and return a client."""
+    os.environ["GOOGLE_API_KEY"] = gemini_key
     os.environ["SERPER_API_KEY"] = serper_key
-    return Groq(api_key=groq_key)
+    return genai.Client(api_key=gemini_key)
 
 def _ask(llm, prompt: str) -> str:
-    """Send a prompt to Groq and return the text response."""
-    response = llm.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
+    """Send a prompt to Gemini and return the text response."""
+    response = llm.models.generate_content(
+        model="gemini-2.0-flash-lite",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.2),
     )
-    return response.choices[0].message.content.strip()
+    return response.text.strip()
 
 def extract_country(llm, article_text: str, file_name: str) -> str:
-    """Use AI to extract the primary country an article is about."""
     prompt = f"""Read the following article excerpt and identify the PRIMARY country it is about.
 
 Rules:
@@ -437,26 +438,26 @@ with st.sidebar:
 
     st.markdown("### ⚙️ API Keys")
     try:
-        default_groq   = st.secrets.get("GROQ_API_KEY", "")
+        default_gemini = st.secrets.get("GOOGLE_API_KEY", "")
         default_serper = st.secrets.get("SERPER_API_KEY", "")
     except Exception:
-        default_groq   = ""
+        default_gemini = ""
         default_serper = ""
 
-    groq_key   = st.text_input("Groq API Key", value=default_groq, type="password", placeholder="gsk_...")
+    gemini_key = st.text_input("Google Gemini API Key", value=default_gemini, type="password", placeholder="AIza...")
     serper_key = st.text_input("Serper API Key", value=default_serper, type="password", placeholder="Your Serper key")
     st.markdown(
         "<p style='color:#7a8099;font-size:0.75rem'>"
-        "Get a free Groq key at <a href='https://console.groq.com' target='_blank' style='color:#e8b86d'>console.groq.com</a>"
+        "Get a free Gemini key at <a href='https://aistudio.google.com' target='_blank' style='color:#e8b86d'>aistudio.google.com</a>"
         "</p>",
         unsafe_allow_html=True
     )
 
-    keys_ready     = bool(groq_key and serper_key)
+    keys_ready     = bool(gemini_key and serper_key)
     bundled_exists = os.path.exists(BUNDLED_FOLDER)
 
     if keys_ready and bundled_exists and not st.session_state.articles:
-        st.session_state.llm = build_llm(groq_key, serper_key)
+        st.session_state.llm = build_llm(gemini_key, serper_key)
         with st.spinner("Loading articles…"):
             prog = st.progress(0, text="Checking article cache…")
             arts, ca = auto_load_bundled(st.session_state.llm)
@@ -483,7 +484,7 @@ with st.sidebar:
         if not keys_ready:
             st.error("Enter both API keys first.")
         else:
-            st.session_state.llm = build_llm(groq_key, serper_key)
+            st.session_state.llm = build_llm(gemini_key, serper_key)
             for k in ["articles","country_articles","selected_country",
                       "selected_article","summary","enhanced_summary",
                       "web_results","web_search_done","chat_history"]:
@@ -512,7 +513,7 @@ with st.sidebar:
             st.error("Enter both API keys first.")
         else:
             if not st.session_state.llm:
-                st.session_state.llm = build_llm(groq_key, serper_key)
+                st.session_state.llm = build_llm(gemini_key, serper_key)
             with st.spinner("Extracting ZIP…"):
                 new_arts = load_from_zip(zip_file)
 
