@@ -166,7 +166,7 @@ def _ask(llm, prompt: str) -> str:
     for attempt in range(5):
         try:
             response = llm.models.generate_content(
-                model="gemini-2.0-flash-lite",
+                model="gemini-2.0-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.2),
             )
