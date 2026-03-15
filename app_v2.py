@@ -403,7 +403,11 @@ def process_articles(raw_articles: list, llm, progress_widget=None) -> tuple:
     for i, art in enumerate(need_ai):
         if progress_widget and total > 0:
             progress_widget.progress(i / total, text=f"🤖 Detecting country: {art['file_name']}")
-        country = extract_country(llm, art["text"], art["file_name"])
+        try:
+            country = extract_country(llm, art["text"], art["file_name"])
+        except Exception as e:
+            print(f"Skipping {art['file_name']} due to error: {e}")
+            country = "Unknown"
         art["country"] = country
         cache[art["file_name"]] = country
         new_extractions += 1
